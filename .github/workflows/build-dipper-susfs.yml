@@ -116,7 +116,17 @@ jobs:
           echo "=== kernelrelease ==="
           make $ARGS kernelrelease
           echo "=== full build ==="
-          make $ARGS 2>&1 | tail -120
+          set +e
+          make $ARGS > /tmp/build.log 2>&1
+          rc=$?
+          echo "build exit=$rc"
+          echo "=== COMPILE ERRORS ==="
+          grep -nE "error:|fatal error|Error [0-9]+" /tmp/build.log | head -40 || echo "(none)"
+          echo "=== FAILED TARGETS ==="
+          grep -nE "^\s*(CC|LD|AS|GEN).*|make\[[0-9]\]: \*\*\*" /tmp/build.log | grep -E "\*\*\*" | head -20 || true
+          echo "=== LAST 60 ==="
+          tail -60 /tmp/build.log
+          exit $rc
 
       - name: Pack AnyKernel3
         run: |
