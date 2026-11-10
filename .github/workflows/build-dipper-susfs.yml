@@ -113,7 +113,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p "$OUT_DIR"
-          ARGS="-j$(nproc) O=$OUT_DIR ARCH=arm64 CC=$GITHUB_WORKSPACE/$CC_BIN CROSS_COMPILE=$GITHUB_WORKSPACE/$CROSS CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/$CROSS32"
+          ARGS="-j$(nproc) O=$OUT_DIR ARCH=arm64 CC=$GITHUB_WORKSPACE/$CC_BIN CROSS_COMPILE=$GITHUB_WORKSPACE/$CROSS CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/$CROSS32 KCFLAGS=-Wno-declaration-after-statement"
           make $ARGS dipper_user_defconfig
           echo "=== key configs ==="
           grep -E "CONFIG_KSU_SUSFS=y|CONFIG_KSU=y" "$OUT_DIR/.config"
