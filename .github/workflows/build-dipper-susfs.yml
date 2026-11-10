@@ -64,6 +64,24 @@ jobs:
           curl -fsSL "$B/fs/susfs.c"                -o susfs/susfs.c
           curl -fsSL "$B/include/linux/susfs.h"     -o susfs/susfs.h
           curl -fsSL "$B/include/linux/susfs_def.h" -o susfs/susfs_def.h
+          python3 - <<'PY'
+          import re
+          src = open('susfs/patch.patch', encoding='utf-8', errors='replace').read()
+          parts = re.split(r'(?m)^(?=diff --git )', src)
+          # fs/notify/fdinfo.c 用了 4.19+ 才有的 inotify_mark_user_mask()，4.9 上不存在
+          drop = ('a/fs/notify/fdinfo.c ',)
+          keep, dropped = [], []
+          for p in parts:
+              if not p.startswith('diff --git '):
+                  keep.append(p); continue
+              if any(d in p.splitlines()[0] for d in drop):
+                  dropped.append(p.splitlines()[0].split(' b/')[-1])
+              else:
+                  keep.append(p)
+          out = ''.join(keep)
+          open('susfs/patch.patch','w',encoding='utf-8').write(out)
+          print('dropped:', dropped, 'hunks kept:', out.count('\n@@'))
+          PY
           wc -l susfs/*
           cp -v susfs/susfs.c kernel/fs/
           cp -v susfs/susfs.h susfs/susfs_def.h kernel/include/linux/
