@@ -1,0 +1,52 @@
+name: TEST susfs patch apply
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patch curl git
+
+      - name: Clone kernel source
+        run: git clone --depth=1 -b 88-zstd https://github.com/diyishengqing/Xiaomi_Kernel_OpenSource-sdm845 kernel
+
+      - name: Fetch SUSFS 4.9 files
+        run: |
+          set -eux
+          mkdir -p susfs
+          B=https://raw.githubusercontent.com/wxx9248/susfs4ksu/kernel-4.9-v2/kernel_patches
+          curl -fsSL "$B/50_add_susfs_in_kernel-4.9.patch" -o susfs/susfs.patch
+          curl -fsSL "$B/fs/susfs.c"                    -o susfs/susfs.c
+          curl -fsSL "$B/include/linux/susfs.h"         -o susfs/susfs.h
+          curl -fsSL "$B/include/linux/susfs_def.h"     -o susfs/susfs_def.h
+          wc -l susfs/*
+
+      - name: Kernel identity
+        run: |
+          cd kernel
+          head -5 Makefile
+          ls arch/arm64/configs/ | grep -i dipper || true
+
+      - name: Dry run patch and report every failure
+        run: |
+          cd kernel
+          cp -v ../susfs/susfs.c fs/
+          cp -v ../susfs/susfs.h ../susfs/susfs_def.h include/linux/
+          set +e
+          patch -p1 --batch --forward --fuzz=3 --dry-run < ../susfs/susfs.patch > /tmp/p.log 2>&1
+          rc=$?
+          echo "=== patch exit=$rc ==="
+          echo
+          echo "=== FAILED / REJECTED ==="
+          grep -nE "FAILED|Reversed|malformed|previously applied|can't find file|No such file" /tmp/p.log || echo "(none)"
+          echo
+          echo "=== ALL OUTPUT ==="
+          cat /tmp/p.log
+          echo
+          echo "=== HUNK COUNT ==="
+          grep -c '^@@' ../susfs/susfs.patch
