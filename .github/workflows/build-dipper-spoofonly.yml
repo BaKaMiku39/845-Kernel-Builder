@@ -1,0 +1,78 @@
+name: Build dipper spoofed kernel (no susfs)
+
+# 最小风险版：沿用 845-Kernel-Builder 已验证过的构建路径（官方 KernelSU + 原厂内核源码），
+# 只改内核版本串，让 uname / proc/version 里不再出现 -ksu 和 -dirty。
+
+on:
+  workflow_dispatch:
+
+env:
+  OUT_DIR: ${{ github.workspace }}/out
+  CC_BIN: clang13/clang/host/linux-x86/clang-r428724/bin/clang
+  CROSS: clang13/linaro-gcc-4.9/aarch64-linux-gnu/bin/aarch64-linux-gnu-
+  CROSS32: clang13/linaro-gcc-4.9/arm-linux-gnueabi/bin/arm-linux-gnueabi-
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc curl git zip wget zstd patch \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libfl-dev \
+            python3 libarchive-tools
+
+      - name: Clone AnyKernel3
+        run: git clone --depth=1 -b master https://github.com/diyishengqing/AnyKernel3 AnyKernel3
+
+      - name: Clone kernel source (MIUI Android 10 base)
+        run: git clone --depth=1 -b 88-zstd https://github.com/diyishengqing/Xiaomi_Kernel_OpenSource-sdm845 kernel
+
+      - name: Clone toolchain
+        run: |
+          git clone --depth=1 -b clang13 https://github.com/diyishengqing/android-kernel-tools clang13
+          echo "$PWD/clang13/bin" >> "$GITHUB_PATH"
+
+      - name: Integrate official KernelSU
+        working-directory: kernel
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s
+          echo 'CONFIG_KPROBES=y' >> arch/arm64/configs/dipper_user_defconfig
+          echo 'CONFIG_HAVE_KPROBES=y' >> arch/arm64/configs/dipper_user_defconfig
+          echo 'CONFIG_KPROBE_EVENTS=y' >> arch/arm64/configs/dipper_user_defconfig
+
+      - name: Spoof kernel version string
+        working-directory: kernel
+        run: |
+          CFG=arch/arm64/configs/dipper_user_defconfig
+          sed -i '/^CONFIG_LOCALVERSION=/d' "$CFG"
+          sed -i '/^CONFIG_LOCALVERSION_AUTO=/d' "$CFG"
+          echo 'CONFIG_LOCALVERSION="-perf"' >> "$CFG"
+          echo '# CONFIG_LOCALVERSION_AUTO is not set' >> "$CFG"
+          sed -i "s/printf '%s' -dirty/printf '%s' ''/g" scripts/setlocalversion
+          grep -n 'LOCALVERSION' "$CFG" | tail -3
+
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          mkdir -p "$OUT_DIR"
+          ARGS="-j$(nproc) O=$OUT_DIR ARCH=arm64 CC=$GITHUB_WORKSPACE/$CC_BIN \
+                CROSS_COMPILE=$GITHUB_WORKSPACE/$CROSS \
+                CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/$CROSS32"
+          make $ARGS dipper_user_defconfig
+          make $ARGS
+
+      - name: Pack AnyKernel3
+        run: |
+          ls -l "$OUT_DIR/arch/arm64/boot/" || true
+          cp "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" AnyKernel3/
+          cd AnyKernel3
+          zip -q -r "$GITHUB_WORKSPACE/dipper-spoof-$(date +%Y%m%d).zip" *
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dipper-spoof-kernel
+          path: dipper-spoof-*.zip
+          retention-days: 7
