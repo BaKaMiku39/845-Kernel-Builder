@@ -8,6 +8,7 @@ env:
   CC_BIN: clang13/clang/host/linux-x86/clang-r428724/bin/clang
   CROSS: clang13/linaro-gcc-4.9/aarch64-linux-gnu/bin/aarch64-linux-gnu-
   CROSS32: clang13/linaro-gcc-4.9/arm-linux-gnueabi/bin/arm-linux-gnueabi-
+  SUSFS_RAW: https://raw.githubusercontent.com/wxx9248/susfs4ksu/kernel-4.9-v2/kernel_patches
 
 jobs:
   build:
@@ -16,7 +17,7 @@ jobs:
       - name: Install prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc curl git zip wget zstd \
+          sudo apt-get install -y build-essential bc curl git zip wget zstd patch \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libfl-dev \
             python3 libarchive-tools
 
@@ -31,25 +32,45 @@ jobs:
           git clone --depth=1 -b clang13 https://github.com/diyishengqing/android-kernel-tools clang13
           echo "$PWD/clang13/bin" >> "$GITHUB_PATH"
 
-      - name: Integrate BakaSU (KernelSU-Next family, keeps non-GKI 4.9 support)
+      - name: Integrate BakaSU (KernelSU-Next family, non-GKI 4.9 support)
         working-directory: kernel
         run: |
           curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main
-          ls -1 | grep -i -E 'bakasu|kernelsu|susfs' || true
+          echo "--- integrated dirs ---"
+          ls -1d KernelSU* BakaSU* susfs* 2>/dev/null || true
 
-      - name: Apply SUSFS 4.9 patches
+      - name: Fetch SUSFS 4.9 files
         run: |
-          git clone --depth=1 -b kernel-4.9-v2 https://github.com/wxx9248/susfs4ksu susfs
-          cp susfs/kernel_patches/fs/susfs.c              kernel/fs/
-          cp susfs/kernel_patches/include/linux/susfs.h   kernel/include/linux/
-          cp susfs/kernel_patches/include/linux/susfs_def.h kernel/include/linux/
+          set -eux
+          rm -rf susfs && mkdir -p susfs
+          curl -fsSL "$SUSFS_RAW/fs/susfs.c"                          -o susfs/susfs.c
+          curl -fsSL "$SUSFS_RAW/include/linux/susfs.h"               -o susfs/susfs.h
+          curl -fsSL "$SUSFS_RAW/include/linux/susfs_def.h"           -o susfs/susfs_def.h
+          curl -fsSL "$SUSFS_RAW/50_add_susfs_in_kernel-4.9.patch"    -o susfs/susfs.patch
+          ls -l susfs
+          cp -v susfs/susfs.c kernel/fs/
+          cp -v susfs/susfs.h susfs/susfs_def.h kernel/include/linux/
+
+      - name: Apply SUSFS 4.9 patch
+        run: |
           cd kernel
-          patch -p1 --fuzz=3 < ../susfs/kernel_patches/50_add_susfs_in_kernel-4.9.patch
+          set +e
+          patch -p1 --batch --forward --fuzz=3 < ../susfs/susfs.patch > /tmp/patch.log 2>&1
+          rc=$?
+          echo "=== patch exit code: $rc ==="
+          grep -E 'FAILED|Reversed|malformed|can.t find file' /tmp/patch.log | head -40 || true
+          tail -25 /tmp/patch.log
+          if [ $rc -ne 0 ]; then
+            echo "=== REJECTED HUNKS ==="
+            find . -name '*.rej' | head -20
+            exit 1
+          fi
 
       - name: Tune defconfig (SUSFS on + kernel string spoofed)
         working-directory: kernel
         run: |
           CFG=arch/arm64/configs/dipper_user_defconfig
+          sed -i '/^CONFIG_LOCALVERSION/d' "$CFG"
           {
             echo 'CONFIG_KSU_SUSFS=y'
             echo 'CONFIG_KSU_SUSFS_SUS_PATH=y'
@@ -60,11 +81,11 @@ jobs:
             echo 'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y'
             echo 'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y'
             echo 'CONFIG_KSU_SUSFS_SUS_MAP=y'
-            echo '# CONFIG_LOCALVERSION_AUTO is not set'
             echo 'CONFIG_LOCALVERSION="-perf"'
+            echo '# CONFIG_LOCALVERSION_AUTO is not set'
           } >> "$CFG"
           sed -i "s/printf '%s' -dirty/printf '%s' ''/g" scripts/setlocalversion
-          grep -n 'LOCALVERSION' "$CFG" | tail -3
+          tail -12 "$CFG"
 
       - name: Build kernel
         working-directory: kernel
@@ -78,6 +99,7 @@ jobs:
 
       - name: Pack AnyKernel3
         run: |
+          ls -l "$OUT_DIR/arch/arm64/boot/" || true
           cp "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" AnyKernel3/
           cd AnyKernel3
           zip -q -r "$GITHUB_WORKSPACE/dipper-susfs-$(date +%Y%m%d).zip" *
