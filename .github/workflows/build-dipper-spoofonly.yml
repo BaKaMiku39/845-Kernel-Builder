@@ -34,10 +34,12 @@ jobs:
           git clone --depth=1 -b clang13 https://github.com/diyishengqing/android-kernel-tools clang13
           echo "$PWD/clang13/bin" >> "$GITHUB_PATH"
 
-      - name: Integrate official KernelSU
+      - name: Integrate official KernelSU (pinned v0.9.5 - last version that builds on 4.9)
         working-directory: kernel
         run: |
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/v0.9.5/kernel/setup.sh" | bash -s v0.9.5
+          echo "--- kernelsu dir ---"
+          ls -1d KernelSU drivers/kernelsu 2>/dev/null || true
           echo 'CONFIG_KPROBES=y' >> arch/arm64/configs/dipper_user_defconfig
           echo 'CONFIG_HAVE_KPROBES=y' >> arch/arm64/configs/dipper_user_defconfig
           echo 'CONFIG_KPROBE_EVENTS=y' >> arch/arm64/configs/dipper_user_defconfig
