@@ -1,0 +1,124 @@
+name: TEST bakasu integrate + hook check
+
+on:
+  workflow_dispatch:
+
+env:
+  OUT_DIR: ${{ github.workspace }}/out
+  CC_BIN: clang13/clang/host/linux-x86/clang-r428724/bin/clang
+  CROSS: clang13/linaro-gcc-4.9/aarch64-linux-gnu/bin/aarch64-linux-gnu-
+  CROSS32: clang13/linaro-gcc-4.9/arm-linux-gnueabi/bin/arm-linux-gnueabi-
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc curl git zip patch libssl-dev libfl-dev python3
+
+      - name: Clone kernel source
+        run: git clone --depth=1 -b 88-zstd https://github.com/diyishengqing/Xiaomi_Kernel_OpenSource-sdm845 kernel
+
+      - name: Clone toolchain
+        run: |
+          git clone --depth=1 -b clang13 https://github.com/diyishengqing/android-kernel-tools clang13
+          echo "$PWD/clang13/bin" >> "$GITHUB_PATH"
+
+      - name: Report pre-existing KSU hooks in tree
+        run: |
+          cd kernel
+          for f in fs/stat.c drivers/input/input.c fs/exec.c fs/open.c fs/read_write.c fs/namei.c kernel/sys.c security/selinux/hooks.c fs/proc/base.c; do
+            echo "--- $f ---"
+            grep -nE 'ksu_|susfs' "$f" || echo "  (none)"
+          done
+
+      - name: Integrate BakaSU
+        working-directory: kernel
+        run: |
+          set -x
+          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s
+          echo "--- after setup ---"
+          ls -1d KernelSU drivers/kernelsu 2>/dev/null || true
+          grep -n kernelsu drivers/Makefile drivers/Kconfig 2>/dev/null || true
+
+      - name: Fetch and filter SUSFS patch
+        run: |
+          set -eux
+          mkdir -p susfs
+          B=https://raw.githubusercontent.com/wxx9248/susfs4ksu/kernel-4.9-v2/kernel_patches
+          curl -fsSL "$B/50_add_susfs_in_kernel-4.9.patch" -o susfs/full.patch
+          curl -fsSL "$B/fs/susfs.c"                -o susfs/susfs.c
+          curl -fsSL "$B/include/linux/susfs.h"     -o susfs/susfs.h
+          curl -fsSL "$B/include/linux/susfs_def.h" -o susfs/susfs_def.h
+          python3 - <<'PY'
+          import re
+          src = open('susfs/full.patch', encoding='utf-8', errors='replace').read()
+          parts = re.split(r'(?m)^(?=diff --git )', src)
+          drop = ('a/fs/stat.c ', 'a/drivers/input/input.c ')
+          keep, dropped = [], []
+          for p in parts:
+              if not p.startswith('diff --git '):
+                  keep.append(p); continue
+              head = p.splitlines()[0]
+              if any(d in head for d in drop):
+                  dropped.append(head.split(' b/')[-1])
+              else:
+                  keep.append(p)
+          open('susfs/patch.patch','w',encoding='utf-8').write(''.join(keep))
+          print('dropped files:', dropped)
+          print('kept diff sections:', sum(1 for p in keep if p.startswith('diff --git ')))
+          print('kept hunks:', open('susfs/patch.patch',encoding='utf-8').read().count('\n@@'))
+          PY
+          cp -v susfs/susfs.c kernel/fs/
+          cp -v susfs/susfs.h susfs/susfs_def.h kernel/include/linux/
+
+      - name: Apply filtered patch
+        run: |
+          cd kernel
+          set +e
+          patch -p1 --batch --forward --fuzz=3 < ../susfs/patch.patch > /tmp/p.log 2>&1
+          echo "exit=$?"
+          grep -E "patching file|FAILED|Reversed|can't find" /tmp/p.log || true
+          echo "--- rejects ---"
+          find . -name '*.rej' | head || true
+          exit $(grep -c 'FAILED' /tmp/p.log)
+
+      - name: Configure defconfig
+        working-directory: kernel
+        run: |
+          CFG=arch/arm64/configs/dipper_user_defconfig
+          sed -i '/^CONFIG_KSU/d' "$CFG"
+          sed -i '/^# CONFIG_KSU/d' "$CFG"
+          sed -i '/^CONFIG_LOCALVERSION/d' "$CFG"
+          sed -i '/^# CONFIG_LOCALVERSION/d' "$CFG"
+          {
+            echo 'CONFIG_KSU=y'
+            echo 'CONFIG_KPROBES=y'
+            echo 'CONFIG_HAVE_KPROBES=y'
+            echo 'CONFIG_KPROBE_EVENTS=y'
+            echo 'CONFIG_KSU_SUSFS=y'
+            echo 'CONFIG_KSU_SUSFS_SUS_PATH=y'
+            echo 'CONFIG_KSU_SUSFS_SUS_MOUNT=y'
+            echo 'CONFIG_KSU_SUSFS_SPOOF_UNAME=y'
+            echo 'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y'
+            echo 'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y'
+            echo 'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y'
+            echo 'CONFIG_KSU_SUSFS_SUS_MAP=y'
+            echo 'CONFIG_LOCALVERSION="-perf"'
+            echo '# CONFIG_LOCALVERSION_AUTO is not set'
+          } >> "$CFG"
+          sed -i "s/printf '%s' -dirty/printf '%s' ''/g" scripts/setlocalversion
+          tail -16 "$CFG"
+
+      - name: Build KSU dir only (triggers hook validation)
+        working-directory: kernel
+        run: |
+          mkdir -p "$OUT_DIR"
+          ARGS="-j$(nproc) O=$OUT_DIR ARCH=arm64 CC=$GITHUB_WORKSPACE/$CC_BIN CROSS_COMPILE=$GITHUB_WORKSPACE/$CROSS CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/$CROSS32"
+          make $ARGS dipper_user_defconfig
+          echo "=== KSU config state ==="
+          grep -E "CONFIG_KSU" "$OUT_DIR/.config" || true
+          echo "=== building drivers/kernelsu ==="
+          make $ARGS drivers/kernelsu/ 2>&1 | tail -60
