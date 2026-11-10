@@ -69,7 +69,8 @@ jobs:
           src = open('susfs/patch.patch', encoding='utf-8', errors='replace').read()
           parts = re.split(r'(?m)^(?=diff --git )', src)
           # fs/notify/fdinfo.c 用了 4.19+ 才有的 inotify_mark_user_mask()，4.9 上不存在
-          drop = ('a/fs/notify/fdinfo.c ',)
+          # fs/proc/cmdline.c 在小米树里是精简版，补丁靠 fuzz 会插错位置，改为手工插入
+          drop = ('a/fs/notify/fdinfo.c ', 'a/fs/proc/cmdline.c ')
           keep, dropped = [], []
           for p in parts:
               if not p.startswith('diff --git '):
@@ -99,6 +100,35 @@ jobs:
           grep -c "ksu_handle_faccessat" fs/open.c
           grep -c "ksu_handle_stat" fs/stat.c
           grep -c "ksu_handle_execveat" fs/exec.c
+
+      - name: Patch cmdline spoof manually
+        run: |
+          python3 - <<'PY'
+          p = 'kernel/fs/proc/cmdline.c'
+          s = open(p, encoding='utf-8', errors='replace').read()
+          anchor = 'static int cmdline_proc_show(struct seq_file *m, void *v)\n{\n'
+          assert anchor in s, 'anchor not found'
+          body = (
+              '#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n'
+              '\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n'
+              '\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n'
+              '\t\treturn 0;\n'
+              '\t}\n'
+              '#endif\n'
+          )
+          s = s.replace(anchor, anchor + body, 1)
+          top = '#include <linux/seq_file.h>\n'
+          assert top in s, 'include anchor not found'
+          decl = (
+              '\n#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n'
+              'extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\n'
+              'extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n'
+              '#endif\n'
+          )
+          s = s.replace(top, top + decl, 1)
+          open(p, 'w', encoding='utf-8').write(s)
+          print(s)
+          PY
 
       - name: Configure defconfig
         working-directory: kernel
